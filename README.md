@@ -1,5 +1,5 @@
 # Artstation-webscraper
-Use this to download all images from one or multiple links of an arttist
+Use this to download all images from one or multiple links of an artist
 
 Put (multiple) artist links in links.txt and run artstationDownloader.py
 Or run artstationDownloader.py with an artist link as argument
