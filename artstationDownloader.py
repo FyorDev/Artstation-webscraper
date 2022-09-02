@@ -5,7 +5,7 @@ import sys
 import os
 from selenium import webdriver
 from selenium.webdriver.common.by import By
-#import urllib.request
+import re
 import time
 import requests
 
@@ -16,6 +16,8 @@ from selenium.common.exceptions import TimeoutException
 
 # Loads the driver, not in headless mode because then images won't load
 options = webdriver.ChromeOptions()
+options.add_argument('--disable-browser-side-navigation')
+#options.add_argument("--disable-gpu")
 options.add_argument('--dns-prefetch-disable')
 options.add_argument('--disable-dev-shm-usage')
 driver = webdriver.Chrome(options=options)
@@ -63,12 +65,10 @@ def scrape(link):
     # Open the link
     driver.get(link + "/albums/all")
     print("Opened webpage")
-    # Wait for it to load and scroll down
-    time.sleep(2)
-    scrolldown(50)
 
     # Prepare folder
     artistName =  driver.find_element(By.CLASS_NAME, "artist-name").text
+    artistName = re.sub(r'\W+', '', artistName)
     dirName = link.replace("https://www.artstation.com/", '')
     workingDir = os.getcwd() + "/Artists/" + artistName + " " + dirName
 
@@ -76,14 +76,21 @@ def scrape(link):
         os.mkdir(workingDir)
         print("Created " + workingDir)
     else:
-        print("Folder already exists, skipping makedir for: " + workingDir)
+        print("Folder already exists, skipping " + workingDir)
+        return
+        
+    # Wait for it to load and scroll down
+    time.sleep(2)
+    scrolldown(50)
 
     links_list = links()
 
     count = 0
     for link in links_list:
         print("Opening " + link)
+        time.sleep(0.1)
         driver.get(link)
+        time.sleep(0.1)
         try:
             print("Loading...")
             myElem = WebDriverWait(driver, 5).until(EC.presence_of_element_located((By.XPATH, "//div[@class=\"asset-image\"]/picture/img")))
@@ -128,7 +135,7 @@ def scrape(link):
             print ("#")
             print ("#")
             print ("#")
-            print ("#")     
+            print ("#")
 
 
 
