@@ -46,14 +46,15 @@ def scrolldown(int):
     return
 
 def links():
-    links_to_images = driver.find_elements(By.CLASS_NAME, "project-image")
-    # Initiates list
+    # Find all links containing '/artwork/' from the current profile
+    all_links = driver.find_elements(By.TAG_NAME, "a")
     links_list = []
 
-    # Get all links to artworks in profile
-    for link in links_to_images:
-        if link.get_attribute('href') not in links_list:
-            links_list.append(link.get_attribute('href'))
+    for link in all_links:
+        href = link.get_attribute('href')
+        if href and '/artwork/' in href and href not in links_list:
+            links_list.append(href)
+    
     return links_list
 
 
@@ -66,14 +67,14 @@ def scrape(link):
     driver.get(link + "/albums/all")
     print("Opened webpage")
 
-    # Prepare folder
-    artistName =  driver.find_element(By.CLASS_NAME, "artist-name").text
+    # Prepare folder - extract artist name from URL
+    artistName = link.replace("https://www.artstation.com/", '')
     artistName = re.sub(r'\W+', '', artistName)
     dirName = link.replace("https://www.artstation.com/", '')
     workingDir = os.getcwd() + "/Artists/" + artistName + " " + dirName
 
     if not os.path.exists(workingDir):
-        os.mkdir(workingDir)
+        os.makedirs(workingDir)
         print("Created " + workingDir)
     else:
         print("Folder already exists, skipping " + workingDir)
