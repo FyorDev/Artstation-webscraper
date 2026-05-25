@@ -1,70 +1,67 @@
 import sys
 import os
-from selenium import webdriver
-from selenium.webdriver.common.by import By
 import time
-import requests
+from utils import create_session, BASE_URL
 
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.webdriver.common.by import By
-from selenium.common.exceptions import TimeoutException
+def get_following_list(username):
+    """Fetch all artists that a user follows."""
+    session = create_session()
+    following_list = []
+    page = 1
+    
+    while True:
+        url = f"{BASE_URL}/users/{username}/following.json"
+        params = {'page': page}
+        
+        try:
+            print(f"Fetching page {page}...")
+            response = session.get(url, params=params, timeout=10)
+            
+            if response.status_code == 403:
+                print("Error: Got 403 Forbidden.")
+                return following_list
+            
+            response.raise_for_status()
+            data = response.json()
+            
+            if not data or not data.get('data'):
+                print(f"Fetched {page - 1} pages total")
+                break
+            
+            users = data['data']
+            following_list.extend(users)
+            print(f"  Found {len(users)} users on page {page}")
+            
+            page += 1
+            time.sleep(0.5)
+        except Exception as e:
+            print(f"Error fetching page {page}: {e}")
+            break
+    
+    return following_list
 
-# Loads the driver, not in headless mode because then images won't load
-options = webdriver.ChromeOptions()
-#options.add_argument('--disable-dev-shm-usage')
-driver = webdriver.Chrome(options=options)
-
-# If an argument was given take the link, otherwise default to my profile
-if len(sys.argv) >= 2:
-    link = str(sys.argv[1])
-    print("Opening: " + str(sys.argv[1]))
-else:
-    link = "https://www.artstation.com/(your name)/following"
-    print("Opening default link")
-
-def scrolldown(int):
-    i = 0
-    amount_of_scroll_down_attempts = int
-    # Scrolls to the bottom of the page, ensuring that all images are loaded in.
-    while i < amount_of_scroll_down_attempts:
-        driver.execute_script(
-            "window.scrollTo(0, document.body.scrollHeight);")
-        time.sleep(0.1)
-        i = i + 1
-    return
-
-def links():
-    links_to_images = driver.find_elements(By.CLASS_NAME, "users-grid-name")
-
-    print(len(links_to_images), " links found")
-    print(links_to_images)
-    # Initiates list
-    links_list = []
-
-    # Get all links to artworks in profile
-    for link in links_to_images:
-        if link.find_element(By.CLASS_NAME, "text-white").get_attribute('href') not in links_list:
-            links_list.append(link.find_element(By.CLASS_NAME, "text-white").get_attribute('href'))
-    return links_list
-
-
-# Open the link
-driver.get(link)
-print("Opened webpage")
-# Wait for it to load and scroll down
-time.sleep(2)
-scrolldown(50)
-
-links_list = links()
-print(str(len(links_list)) + "links to write found")
-print(links_list)
-
-workingDir = os.getcwd()
-
-with open(workingDir + "/links.txt", "w") as outfile:
-    outfile.write('\n'.join(links_list) + '\n')
-
-
-driver.close()
-driver.quit()
+if __name__ == "__main__":
+    if len(sys.argv) < 2:
+        print("Usage: python linkGenerator.py <username>")
+        print("\nGenerates a links.txt file with all artists you follow.")
+        sys.exit(1)
+    
+    username = sys.argv[1]
+    print(f"Fetching following list for: {username}")
+    
+    following_users = get_following_list(username)
+    if not following_users:
+        print("No users found. Check your username.")
+        sys.exit(1)
+    
+    # Build URLs from usernames
+    links = [f"{BASE_URL}/{user['username']}" for user in following_users if user.get('username')]
+    
+    # Write to file
+    output_file = os.path.join(os.getcwd(), "links.txt")
+    with open(output_file, "w") as f:
+        f.write('\n'.join(links) + '\n')
+    
+    print(f"\nTotal users followed: {len(following_users)}")
+    print(f"Wrote {len(links)} links to {output_file}")
+    print("Download with: python artstationCrawler.py --batch")

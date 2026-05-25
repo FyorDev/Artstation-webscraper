@@ -1,154 +1,238 @@
-#import requests
-#import pandas
-#import bs4
-import sys
 import os
-from selenium import webdriver
-from selenium.webdriver.common.by import By
+import sys
 import re
-import time
-import requests
+from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from utils import create_session, RateLimitedSession, BASE_URL
 
-from selenium.webdriver.support.ui import WebDriverWait
-from selenium.webdriver.support import expected_conditions as EC
-from selenium.webdriver.common.by import By
-from selenium.common.exceptions import TimeoutException
-
-# Loads the driver, not in headless mode because then images won't load
-options = webdriver.ChromeOptions()
-options.add_argument('--disable-browser-side-navigation')
-#options.add_argument("--disable-gpu")
-options.add_argument('--dns-prefetch-disable')
-options.add_argument('--disable-dev-shm-usage')
-driver = webdriver.Chrome(options=options)
-
-
-# If an argument was given take the link, otherwise get everything from .txt
-if len(sys.argv) >= 2:
-    inputlinks = [str(sys.argv[1])]  
-    print(str(len(inputlinks)) + " links" )
-else:
-    with open(os.getcwd() + "/links.txt") as my_file:
-        inputlinks = my_file.readlines()
-    inputlinks = [s.strip() for s in inputlinks]
-    print(str(len(inputlinks)) + " links" )
+class ArtstationCrawler:
+    """Download artwork from Artstation artists."""
+    def __init__(self, request_delay=0.05):
+        session = create_session()
+        self.request = RateLimitedSession(session, request_delay)
     
-
-def scrolldown(int):
-    i = 0
-    amount_of_scroll_down_attempts = int
-    # Scrolls to the bottom of the page, ensuring that all images are loaded in.
-    while i < amount_of_scroll_down_attempts:
-        driver.execute_script(
-            "window.scrollTo(0, document.body.scrollHeight);")
-        time.sleep(0.1)
-        i = i + 1
-    return
-
-def links():
-    # Find all links containing '/artwork/' from the current profile
-    all_links = driver.find_elements(By.TAG_NAME, "a")
-    links_list = []
-
-    for link in all_links:
-        href = link.get_attribute('href')
-        if href and '/artwork/' in href and href not in links_list:
-            links_list.append(href)
-    
-    return links_list
-
-
-
-def scrape(link):
-
-
-
-    # Open the link
-    driver.get(link + "/albums/all")
-    print("Opened webpage")
-
-    # Prepare folder - extract artist name from URL
-    artistName = link.replace("https://www.artstation.com/", '')
-    artistName = re.sub(r'\W+', '', artistName)
-    dirName = link.replace("https://www.artstation.com/", '')
-    workingDir = os.getcwd() + "/Artists/" + artistName + " " + dirName
-
-    if not os.path.exists(workingDir):
-        os.makedirs(workingDir)
-        print("Created " + workingDir)
-    else:
-        print("Folder already exists, skipping " + workingDir)
-        return
+    def get_projects(self, username, user_id=None):
+        """Get all projects for an artist. Paginates until no more pages are returned."""
+        projects = []
+        page = 1
         
-    # Wait for it to load and scroll down
-    time.sleep(2)
-    scrolldown(50)
-
-    links_list = links()
-
-    count = 0
-    for link in links_list:
-        print("Opening " + link)
-        time.sleep(0.1)
-        driver.get(link)
-        time.sleep(0.1)
+        while True:
+            url = f"{BASE_URL}/users/{username}/projects.json"
+            params = {'page': page}
+            if user_id:
+                params['user_id'] = user_id
+            
+            try:
+                print(f"Fetching page {page}...")
+                response = self.request.get(url, params=params, timeout=10)
+                
+                if response.status_code == 403:
+                    print("Error: Got 403 Forbidden")
+                    print("Request blocked by Cloudflare or access denied.")
+                    break
+                
+                response.raise_for_status()
+                data = response.json()
+                
+                if not data or not data.get('data'):
+                    break
+                
+                projects.extend(data['data'])
+                print(f"  Found {len(data.get('data', []))} projects on page {page}")
+                
+                # continue paginating until server returns no data
+                page += 1
+            except Exception as e:
+                print(f"Error fetching page {page}: {e}")
+                break
+        
+        return projects
+    
+    def get_project_assets(self, project_id):
+        """Get all assets (images) for a project"""
+        url = f"{BASE_URL}/projects/{project_id}.json"
         try:
-            print("Loading...")
-            myElem = WebDriverWait(driver, 5).until(EC.presence_of_element_located((By.XPATH, "//div[@class=\"asset-image\"]/picture/img")))
-            print("Link loaded")
-            # Finds the elements with the class artwork-image.
-            images = driver.find_elements(By.XPATH, "//div[@class=\"asset-image\"]/picture/img")
-            #images = driver.find_elements(By.XPATH, "//div[@class=\"artwork-image\"]/picture/img")
-            print(str(len(images)) + " images found")
-
-            for image in images:
-                src = image.get_attribute("src")
-                # Strips the query on the right of the filename.
-                filename = str(src).strip("1234567890?")
-                print("found image: " + src)
-                # the path length is different depending on if it is a .gif file or not.
-                if filename.endswith(".gif"):
-                    print("is a gif, skipping because fuck those")
+            response = self.request.get(url, timeout=10)
+            response.raise_for_status()
+            data = response.json()
+            return data.get('assets', [])
+        except Exception as e:
+            print(f"Error getting project assets: {e}")
+            return []
+    
+    def download_image(self, image_url, filepath):
+        """Download an image from URL"""
+        try:
+            response = self.request.get(image_url, timeout=10, stream=True)
+            response.raise_for_status()
+            
+            os.makedirs(os.path.dirname(filepath), exist_ok=True)
+            
+            with open(filepath, 'wb') as f:
+                for chunk in response.iter_content(chunk_size=8192):
+                    if chunk:
+                        f.write(chunk)
+            
+            return True
+        except Exception as e:
+            print(f"Error downloading {image_url}: {e}")
+            return False
+    
+    def scrape_artist(self, username, output_dir="Downloaded", max_workers=4):
+        """Scrape all artwork from an artist using multithreaded downloads."""
+        print(f"Scraping artist: {username}")
+        artist_dir = os.path.join(output_dir, username)
+        artist_path = Path(artist_dir)
+        os.makedirs(artist_dir, exist_ok=True)
+        
+        # Fetch projects
+        projects = self.get_projects(username)
+        if not projects:
+            print("No projects found.")
+            if artist_path.exists() and not any(artist_path.iterdir()):
+                artist_path.rmdir()
+                print(f"[ATYPICAL] Removed empty folder: {artist_dir}")
+            return
+        
+        print(f"Found {len(projects)} projects. Fetching assets...")
+        
+        # Fetch assets in parallel
+        project_assets_map = {}
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            futures = {executor.submit(self.get_project_assets, project.get('id')): project for project in projects}
+            for idx, future in enumerate(as_completed(futures), 1):
+                project = futures[future]
+                project_id = project.get('id')
+                project_title = re.sub(r'\W+', '_', project.get('title', f"project_{project_id}"))[:50]
+                try:
+                    project_assets_map[project_id] = (future.result(), project_title)
+                    if idx % 10 == 0:
+                        print(f"  [{idx}/{len(projects)}] Fetched...")
+                except Exception as e:
+                    print(f"  [ERROR] {project_title}: {e}")
+                    project_assets_map[project_id] = ([], project_title)
+        
+        print("Asset fetching complete!\n")
+        
+        # Collect download tasks
+        download_tasks = []
+        stats = {'videos': 0, 'no_assets': 0, 'existing': 0}
+        
+        for idx, project in enumerate(projects, 1):
+            assets, project_title = project_assets_map.get(project.get('id'), ([], 'unknown'))
+            if not assets:
+                stats['no_assets'] += 1
+                print(f"  [{idx}/{len(projects)}] {project_title}: no assets")
+                continue
+            
+            print(f"  [{idx}/{len(projects)}] {project_title} ({len(assets)} assets)...")
+            for asset in assets:
+                if asset.get('asset_type') == 'video':
+                    stats['videos'] += 1
                     continue
+                
+                image_url = asset.get('image_url') or asset.get('url')
+                if not image_url:
+                    continue
+                
+                filename = os.path.basename(image_url.split('?')[0]) or f"{project_title}_{len(download_tasks)}.jpg"
+                filepath = os.path.join(artist_dir, f"{len(download_tasks) + 1}_{filename}")
+                
+                if not os.path.exists(filepath):
+                    download_tasks.append((image_url, filepath, filename))
                 else:
-                    filename = filename[69:]
-
-                imagecontent = requests.get(src)
-                with open(workingDir + "/" + str(count) + filename, "wb") as outfile:
-                    outfile.write(imagecontent.content)
-                count += 1
-            print("Done downloading files")
-
-        except TimeoutException:
-            print ("#")
-            print ("#")
-            print ("#")
-            print ("#")            
-            print ("#")
-            print ("#") 
-            print ("#")
-            print ("#") 
-            print ("Loading took too much time!")
-            print ("#")
-            print ("#")
-            print ("#")
-            print ("#")
-            print ("#")
-            print ("#")
-            print ("#")
-            print ("#")
-
-
-
-
-for inputlink in inputlinks:
-    print("scraping(" + inputlink + ")")
-    scrape(inputlink)
-    driver.close()
-    driver.quit()
-    driver = webdriver.Chrome(options=options)
+                    stats['existing'] += 1
+        
+        # Download images
+        print(f"\nDownloading {len(download_tasks)} images with {max_workers} threads...")
+        print(f"  [INFO] Request delay: {self.request.request_delay}s")
+        if stats['videos']: print(f"  [INFO] Skipped {stats['videos']} videos")
+        if stats['no_assets']: print(f"  [ATYPICAL] {stats['no_assets']} projects had no assets")
+        if stats['existing']: print(f"  [INFO] Skipped {stats['existing']} existing files")
+        
+        downloaded_count, failed_count = 0, 0
+        with ThreadPoolExecutor(max_workers=max_workers) as executor:
+            futures = {executor.submit(self.download_image, image_url, filepath): filename for image_url, filepath, filename in download_tasks}
+            for future in as_completed(futures):
+                try:
+                    if future.result():
+                        downloaded_count += 1
+                        print(f"    Downloaded: {futures[future]}")
+                    else:
+                        failed_count += 1
+                except Exception as e:
+                    failed_count += 1
+                    print(f"    [ATYPICAL] Error: {e}")
+        
+        print(f"\nTotal images downloaded: {downloaded_count}")
+        if failed_count: print(f"[ATYPICAL] Failed downloads: {failed_count}")
+        
+        # Cleanup empty directory
+        if artist_path.exists() and not any(artist_path.iterdir()):
+            artist_path.rmdir()
+            print(f"[ATYPICAL] Removed empty folder: {artist_dir}")
 
 
+if __name__ == "__main__":
+    if len(sys.argv) < 2:
+        if os.path.exists("links.txt"):
+            print("No username provided. Found links.txt - use --batch to process all links.")
+        print("Usage: python artstationCrawler.py <username> [--delay SECONDS]")
+        print("   or: python artstationCrawler.py --batch [--delay SECONDS]")
+        print()
+        print("Options:")
+        print("  --delay SECONDS    Set request delay (default: 0.05s). Increase for Cloudflare throttling.")
+        sys.exit(1)
+    
+    # Batch mode: download all artists from links.txt
+    if sys.argv[1] == "--batch":
+        print("Starting batch mode...", flush=True)
+        
+        if not os.path.exists("links.txt"):
+            print("ERROR: links.txt not found! Run: python linkGenerator.py <username>")
+            sys.exit(1)
+        
+        request_delay = 0.05
+        if len(sys.argv) >= 4 and sys.argv[2] == "--delay":
+            request_delay = float(sys.argv[3])
+        
+        with open("links.txt") as f:
+            links = [line.strip() for line in f if line.strip()]
+        
+        print(f"\n{'='*60}\nBatch: Processing {len(links)} artists\n{'='*60}\n", flush=True)
+        
+        crawler = ArtstationCrawler(request_delay=request_delay)
+        results = {'successful': 0, 'skipped': 0, 'failed': 0}
+        
+        for idx, link in enumerate(links, 1):
+            username = os.path.basename(link.rstrip('/'))
+            artist_dir = os.path.join("Downloaded", username)
+            
+            if os.path.exists(artist_dir):
+                print(f"[{idx}/{len(links)}] Skipping: {username} (done)", flush=True)
+                results['skipped'] += 1
+            else:
+                print(f"[{idx}/{len(links)}] {username}...\n", flush=True)
+                try:
+                    crawler.scrape_artist(username)
+                    results['successful'] += 1
+                except Exception as e:
+                    print(f"ERROR: {e}\n", flush=True)
+                    results['failed'] += 1
+        
+        print(f"\n{'='*60}\nBatch complete: {results['successful']} successful, "
+              f"{results['skipped']} skipped, {results['failed']} failed\n{'='*60}", flush=True)
+        sys.exit(0)
+    
+    # Single artist mode
+    username = sys.argv[1]
+    request_delay = 0.05  # Default delay
+    
+    # Parse optional --delay parameter
+    if len(sys.argv) >= 4 and sys.argv[2] == "--delay":
+        request_delay = float(sys.argv[3])
+    
+    print(f"Using request delay: {request_delay}s (increase with --delay if throttled by Cloudflare)")
+    crawler = ArtstationCrawler(request_delay=request_delay)
+    crawler.scrape_artist(username)
 
-driver.close()
-driver.quit()

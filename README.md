@@ -1,14 +1,25 @@
 # Artstation-webscraper  
-Use this to download all images from one or multiple links of an artist  
+Use this tool to download all images from one or multiple links of Artstation artists, can also use your following.  
 
-Needs selenium chrome, or replace with your own selenium browser.  
 
-Put (multiple) artist links in links.txt and run artstationDownloader.py  
-Or run artstationDownloader.py with an artist link as argument  
-Or run linkGenerator.py with your account/following as the link to fill links.txt with everyone you follow and then run artstationDownloader.py  
+## Examples
 
-Selenium is not run in headless mode since the javascript that loads the images doesn't seem to run then.
+Download all images (of all artworks) from a single artist:
+```
+python artstationDownloader.py <username>
+```
 
-KNOWN ISSUE: sometimes Selenium freezes or crashes, just stop the program, delete the last updated incomplete artist folder and run again.
+Download from multiple artists that you put in links.txt:
+```
+python artstationDownloader.py --batch
+```
+
+Automatically fill links.txt with all artists that you follow on Artstation.
+```
+python linkGenerator.py <username>
+```
+
+Batch download from links.txt:
+
 
 Related project: https://github.com/FyorUU/PureRef-format
